@@ -17,6 +17,21 @@ also required or systemd never reaches "running".
 one real, reference-listed, boot-time-flaggable unit is genuinely
 present and enabled -- proving the advisor's suggestions correspond to
 something real, not just parsed text.
+
+A real, found-not-guessed wrinkle: relying on avahi-daemon.service to
+auto-start purely as a side effect of reaching multi-user.target turned
+out not to be reliable across different real Docker+systemd
+environments -- it auto-started and showed up in `systemd-analyze blame`
+locally (against Colima), but never appeared in `blame` at all in CI
+(GitHub Actions' runner), even though the unit was still genuinely
+"enabled" there (a separate `systemctl is-enabled`/`disable` test passed
+in the same CI run). `systemd-analyze blame` only ever lists a unit's
+MOST RECENT activation -- verified live: stopping and manually
+restarting avahi-daemon.service well after boot still updates its entry
+in `blame` -- so the fix here doesn't chase why the CI runner's boot
+ordering left it inactive; it makes the precondition genuinely true
+before any test relies on it, by explicitly starting the unit and
+confirming it's really active.
 """
 
 from __future__ import annotations
@@ -104,6 +119,23 @@ def boot_container():
             time.sleep(2)
         else:
             pytest.skip(f"systemd konteyner içinde zamanında ayağa kalkmadı (son durum: {last_state!r}).")
+
+        # Don't trust that avahi-daemon auto-started as a side effect of
+        # boot ordering (see module docstring) -- make it genuinely true.
+        subprocess.run(["docker", "exec", CONTAINER_NAME, "systemctl", "start", "avahi-daemon.service"], capture_output=True)
+        active_deadline = time.time() + 30
+        avahi_active = False
+        while time.time() < active_deadline:
+            probe = subprocess.run(
+                ["docker", "exec", CONTAINER_NAME, "systemctl", "is-active", "avahi-daemon.service"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if probe.stdout.strip() == "active":
+                avahi_active = True
+                break
+            time.sleep(1)
+        if not avahi_active:
+            pytest.skip("avahi-daemon.service konteyner içinde gerçekten etkinleştirilemedi.")
 
         yield CONTAINER_NAME
     finally:
